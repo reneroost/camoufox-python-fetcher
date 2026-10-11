@@ -1,5 +1,5 @@
 # Installed at /etc/systemd/system/camoufox-python-fetcher.service on the prod host, DISABLED until
-# news-scraper switches routes to it (its FALLBACK.md is the runbook). Install or update:
+# news-scraper switches routes to it (its FETCHERS.md is the runbook). Install or update:
 #
 #   scp systemd/camoufox-python-fetcher.service hetzner-news:camoufox-python-fetcher.service
 #   ssh -t hetzner-news 'sudo install -m 0644 ~/camoufox-python-fetcher.service /etc/systemd/system/ && sudo systemctl daemon-reload && rm ~/camoufox-python-fetcher.service'

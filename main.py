@@ -38,7 +38,7 @@ own strategies via /trend/test and /content/test, 3 attempts, DataImpulse):
 curl_cffi on the same pages. The three misses are DataDome (nytimes.com twice,
 wsj.com), which curl_cffi passes. Costs: median 7-8 s a fetch against 2.5 s,
 and ~0.9-1.1 MB of proxy traffic against ~77 KB, since a browser loads every
-script. news-scraper's runbook for switching to it is its FALLBACK.md, which
+script. news-scraper's runbook for switching to it is its FETCHERS.md, which
 also covers the zendriver (Chrome) sidecar, the other fallback.
 
 ARCHITECTURE
