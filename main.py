@@ -32,13 +32,14 @@ against 25 of 35 on this version with the challenge wait below.
 AS CURL_CFFI'S FALLBACK
 -----------------------
 This sidecar is news-scraper's fallback for curl_cffi. On 2026-10-11 every
-strategy prod routes to curl_cffi was run through it (bench/, news-scraper's
+strategy prod routes to curl_cffi was run through it (news-scraper's bench/, its
 own strategies via /trend/test and /content/test, 3 attempts, DataImpulse):
 43 of 43 trend lists and 46 of 49 article pages, against 43/43 and 49/49 for
 curl_cffi on the same pages. The three misses are DataDome (nytimes.com twice,
 wsj.com), which curl_cffi passes. Costs: median 7-8 s a fetch against 2.5 s,
 and ~0.9-1.1 MB of proxy traffic against ~77 KB, since a browser loads every
-script. news-scraper's runbook for switching to it is its CAMOUFOX.md.
+script. news-scraper's runbook for switching to it is its FALLBACK.md, which
+also covers the zendriver (Chrome) sidecar, the other fallback.
 
 ARCHITECTURE
 ------------
