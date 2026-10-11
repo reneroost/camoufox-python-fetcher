@@ -29,10 +29,24 @@ The Firefox 135 build this sidecar ran before was blocked almost everywhere:
 on 2026-10-11, 6 of 35 single-attempt fetches of hard news sources passed,
 against 25 of 35 on this version with the challenge wait below.
 
+AS CURL_CFFI'S FALLBACK
+-----------------------
+This sidecar is news-scraper's fallback for curl_cffi. On 2026-10-11 every
+strategy prod routes to curl_cffi was run through it (bench/, news-scraper's
+own strategies via /trend/test and /content/test, 3 attempts, DataImpulse):
+43 of 43 trend lists and 46 of 49 article pages, against 43/43 and 49/49 for
+curl_cffi on the same pages. The three misses are DataDome (nytimes.com twice,
+wsj.com), which curl_cffi passes. Costs: median 7-8 s a fetch against 2.5 s,
+and ~0.9-1.1 MB of proxy traffic against ~77 KB, since a browser loads every
+script. news-scraper's runbook for switching to it is its CAMOUFOX.md.
+
 ARCHITECTURE
 ------------
-- One shared Firefox process, launched at startup and relaunched by the next
-  fetch if it dies (see _ensure_browser).
+- One shared Firefox process, launched at startup, recycled every
+  BROWSER_RECYCLE_AFTER_FETCHES fetches and relaunched by the next fetch if it
+  dies (see _ensure_browser).
+- A non-HTML document (a JSON API) is returned as served, not as the DOM
+  Firefox builds around it.
 - asyncio.Semaphore(MAX_CONCURRENT_FETCHES) limits concurrency.
 - Per request: a new context with its own fingerprint identity (AsyncNewContext)
   → navigate → wait out a Cloudflare interstitial if one appears → dwell or
@@ -70,9 +84,11 @@ On 2026-10-11 the virtual display passed the same share of fetches as headless
 
 MEMORY
 ------
-Firefox plus the sidecar measured ~1.2 GB PSS (median), 1.46 GB peak, over
-35 fetches. Size the unit's MemoryMax above that: when the cgroup kills
-Firefox, the sidecar relaunches it, but every fetch in between fails.
+With the browser recycled every 50 fetches: ~1.3 GB PSS median, 1.57 GB peak
+over the 92-fetch run on 2026-10-11 (without recycling it climbed past 2.1 GB
+and kept going). Threads: ~210 median, 264 peak — so the unit's TasksMax must
+be well above 100, or Firefox cannot start threads and dies. See
+systemd/camoufox-python-fetcher.service for the limits.
 
 ENDPOINTS
 ---------
@@ -112,16 +128,24 @@ DEFAULT_TIMEOUT_SECONDS = 30
 # Cloudflare's managed challenge answers the first navigation with HTTP 403 (or
 # 503) and an interstitial that a real browser solves on its own, then reloads
 # into the page. Returning at that point throws away the one thing a browser has
-# over curl_cffi, so the fetch waits for it to clear. The marker is the inline
-# `window._cf_chl_opt = {...}` every challenge page carries; the title is not
-# one ("Security Verification" at first paint, "Just a moment..." once its
-# script runs), and pages that merely load Cloudflare's background scripts
-# (cdn-cgi/challenge-platform/scripts/...) do not define it.
+# over curl_cffi, so the fetch waits for it to clear. Recognised by Cloudflare's
+# own `cf-mitigated: challenge` header, else by a marker in the page: the inline
+# `window._cf_chl_opt = {...}` of a managed challenge, or the Turnstile script a
+# site's own wall loads (phys.org's "Checking your connection"). Not by the
+# title ("Security Verification" at first paint, "Just a moment..." once its
+# script runs). Only a 403/503 is checked, so a real page that embeds Turnstile
+# or loads Cloudflare's background scripts is never mistaken for a wall.
 # Bounded well inside the 30 s request budget Java gives this sidecar.
 CHALLENGE_STATUSES  = frozenset({403, 503})
-CHALLENGE_MARKER    = "_cf_chl_opt"
+CHALLENGE_MARKERS   = ("_cf_chl_opt", "challenges.cloudflare.com/turnstile")
 CHALLENGE_WAIT_MS   = 15_000
 CHALLENGE_POLL_MS   = 500
+
+# Firefox's memory climbs across fetches even though every context is closed:
+# ~4 MB a fetch, from ~1.2 GB to ~1.8 GB over 140 fetches on 2026-10-11, with
+# no plateau. Relaunching it every this many fetches keeps the sidecar bounded,
+# for ~5 s per relaunch.
+BROWSER_RECYCLE_AFTER_FETCHES = 50
 
 # Aborting these is safe: no anti-bot sensor is delivered as an image or font.
 BLOCKED_RESOURCE_TYPES: frozenset[str] = frozenset({"image", "media", "font"})
@@ -291,6 +315,7 @@ async def _launch_browser() -> None:
     browser  = await launcher.__aenter__()
     _state["launcher"] = launcher
     _state["browser"]  = browser
+    _state["fetches"]  = 0
     log.info(
         "camoufox / Firefox launched. Version: %s | headless=%s | os=%s",
         getattr(browser, "version", "unknown"),
@@ -320,10 +345,15 @@ async def _ensure_browser():
     """
     browser = _state.get("browser")
     if browser is not None and browser.is_connected():
-        return browser
-    log.error("Browser is not connected — relaunching it.")
+        if _state["fetches"] < BROWSER_RECYCLE_AFTER_FETCHES:
+            _state["fetches"] += 1
+            return browser
+        log.info("Recycling the browser after %d fetches.", _state["fetches"])
+    else:
+        log.error("Browser is not connected — relaunching it.")
     await _close_browser()
     await _launch_browser()
+    _state["fetches"] = 1
     return _state["browser"]
 
 
@@ -391,11 +421,14 @@ async def _dwell(page, base_wait_ms: int) -> None:
         log.debug("Dwell interrupted — proceeding with content extraction: %s", exc)
 
 
-async def _is_cloudflare_interstitial(page) -> bool:
+async def _is_cloudflare_interstitial(page, response) -> bool:
+    if (response.headers.get("cf-mitigated") or "").lower() == "challenge":
+        return True
     try:
-        return CHALLENGE_MARKER in await page.content()
+        content = await page.content()
     except Exception:
         return False
+    return any(marker in content for marker in CHALLENGE_MARKERS)
 
 
 def _remaining_ms(deadline: float) -> int:
@@ -403,7 +436,7 @@ def _remaining_ms(deadline: float) -> int:
 
 
 async def _await_challenge(page, url: str, first_status: int,
-                           last_document_status: dict[str, int], deadline: float) -> int:
+                           last_document: dict[str, object], deadline: float) -> int:
     """
     Waits for a Cloudflare interstitial to clear and returns the status of the
     page it cleared into: the challenge script reloads the main frame, and the
@@ -415,7 +448,8 @@ async def _await_challenge(page, url: str, first_status: int,
     log.info("Cloudflare interstitial on %s — waiting up to %d ms for it to clear", url, max(budget_ms, 0))
     for _ in range(max(budget_ms, 0) // CHALLENGE_POLL_MS):
         await page.wait_for_timeout(CHALLENGE_POLL_MS)
-        status = last_document_status.get("status", first_status)
+        latest = last_document.get("response")
+        status = latest.status if latest is not None else first_status
         if status < 400:
             try:
                 await page.wait_for_load_state(
@@ -499,13 +533,13 @@ async def _execute_fetch(browser, req: CamouFoxFetchRequest) -> CamouFoxFetchRes
             if referrer_url:
                 nav_kwargs["referer"] = referrer_url
 
-            # Status of the latest main-frame document: after a solved challenge
+            # The latest main-frame document response: after a solved challenge
             # that is the page Cloudflare reloaded into, not the 403 that goto saw.
-            last_document_status: dict[str, int] = {}
+            last_document: dict[str, object] = {}
 
             def _track_document(resp) -> None:
                 if resp.frame == page.main_frame and resp.request.is_navigation_request():
-                    last_document_status["status"] = resp.status
+                    last_document["response"] = resp
 
             page.on("response", _track_document)
 
@@ -516,12 +550,22 @@ async def _execute_fetch(browser, req: CamouFoxFetchRequest) -> CamouFoxFetchRes
                 return CamouFoxFetchResponse(html=None, final_url=None, status_code=0)
 
             status_code = response.status
-            if status_code in CHALLENGE_STATUSES and await _is_cloudflare_interstitial(page):
+            if status_code in CHALLENGE_STATUSES and await _is_cloudflare_interstitial(page, response):
                 status_code = await _await_challenge(
-                    page, req.url, status_code, last_document_status, deadline)
+                    page, req.url, status_code, last_document, deadline)
             final_url   = page.url
 
             log.info("navigation complete  status=%d  url=%s", status_code, req.url)
+
+            # A non-HTML document is returned as served. Firefox renders JSON in
+            # its viewer, so page.content() would hand Java the viewer's HTML
+            # instead of the payload — which broke every JSON-API trend strategy
+            # (NYT, the Guardian editions, Forbes, Wired...) on this sidecar.
+            document = last_document.get("response") or response
+            content_type = (document.headers.get("content-type") or "").lower()
+            if content_type and "html" not in content_type:
+                return CamouFoxFetchResponse(
+                    html=await document.text(), final_url=final_url, status_code=status_code)
 
             # Selector wait takes priority over dwell when specified by the
             # extraction strategy (per-site config in Java). Selector wait

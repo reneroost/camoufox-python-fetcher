@@ -13,3 +13,7 @@ __pycache__/
 
 # Environment Variables / Secrets
 .env
+
+# Benchmark outputs (bench/README.md)
+bench-*.jsonl
+bench-urls.json

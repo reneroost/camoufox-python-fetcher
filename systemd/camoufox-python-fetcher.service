@@ -1,0 +1,47 @@
+# Installed at /etc/systemd/system/camoufox-python-fetcher.service on the prod host, DISABLED until
+# news-scraper switches routes to it (its CAMOUFOX.md is the runbook). Install or update:
+#
+#   scp systemd/camoufox-python-fetcher.service hetzner-news:camoufox-python-fetcher.service
+#   ssh -t hetzner-news 'sudo install -m 0644 ~/camoufox-python-fetcher.service /etc/systemd/system/ && sudo systemctl daemon-reload && rm ~/camoufox-python-fetcher.service'
+#
+# Limits are sized from measurements on 2026-10-11 (see main.py, MEMORY):
+#   - TasksMax: Firefox ran ~210 threads, peaking at 264. The previous unit's 100 starved it of
+#     threads, which is the likely reason the old instance's browser died and stayed dead.
+#   - Memory: ~1.3 GB median, 1.57 GB peak with the browser recycled every 50 fetches. Above
+#     MemoryHigh the kernel reclaims this unit's memory first (into swap, which the runbook adds
+#     on launch); MemoryMax is the hard ceiling, at which the cgroup kills Firefox and the next
+#     fetch relaunches it.
+
+[Unit]
+Description=Camoufox Python Fetcher (Patched Firefox)
+After=network.target
+
+[Service]
+Type=exec
+User=renx
+Group=renx
+WorkingDirectory=/srv/mostreadnews/camoufox-python-fetcher
+
+# Prevent privilege escalation & isolate filesystem namespaces
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+MemoryHigh=1700M
+MemoryMax=2G
+TasksMax=512
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=camoufox-python-fetcher
+
+ExecStart=/srv/mostreadnews/camoufox-python-fetcher/.venv/bin/python3 main.py
+
+Restart=always
+RestartSec=10
+
+Environment=PYTHONUNBUFFERED=1
+Environment=CAMOUFOX_HOST=127.0.0.1
+Environment=CAMOUFOX_PORT=8085
+
+[Install]
+WantedBy=multi-user.target
