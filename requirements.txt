@@ -1,4 +1,7 @@
 fastapi>=0.110.0
 uvicorn>=0.28.0
-camoufox[geoip]>=0.4.11
+# camoufox and Playwright are pinned together: the browser build (see main.py
+# VERSIONS) speaks the Juggler protocol of this Playwright release.
+camoufox[geoip]==0.5.8
+playwright==1.62.0
 pydantic>=2.6.0
